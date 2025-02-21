@@ -28,15 +28,15 @@ NPROCS ?= 1
 GO_TEST_PARALLEL := $(shell echo $$(( $(NPROCS) / 2 )))
 
 GO_STATIC_PACKAGES = $(GO_PROJECT)/cmd/provider
-GO_SUBDIRS += cmd internal apis
+GO_SUBDIRS += cmd internal apis pkg
 GO111MODULE = on
-GOLANGCILINT_VERSION = 1.51.2
+GOLANGCILINT_VERSION = 1.61.0
 -include build/makelib/golang.mk
 
 # ====================================================================================
 # Setup Kubernetes tools
-KIND_VERSION = v0.11.1
-UP_VERSION = v0.13.0
+KIND_VERSION = v0.22.0
+UP_VERSION = v0.28.0
 UP_CHANNEL = stable
 USE_HELM3 = true
 -include build/makelib/k8s_tools.mk
@@ -74,9 +74,6 @@ XPKGS = provider-kubernetes
 # NOTE(hasheddan): we force image building to happen prior to xpkg build so that
 # we ensure image is present in daemon.
 xpkg.build.provider-kubernetes: do.build.images
-# ====================================================================================
-# Setup Local Dev
--include build/makelib/local.mk
 
 # Generate a coverage report for cobertura applying exclusions on
 # - generated file
@@ -85,17 +82,30 @@ cobertura:
 		grep -v zz_generated.deepcopy | \
 		$(GOCOVER_COBERTURA) > $(GO_TEST_OUTPUT)/cobertura-coverage.xml
 
-# integration tests
-e2e.run: test-integration
+# ====================================================================================
+# End to End Testing
+CROSSPLANE_VERSION = 1.16.0
+CROSSPLANE_NAMESPACE = crossplane-system
+-include build/makelib/local.xpkg.mk
+-include build/makelib/controlplane.mk
 
-local-dev: local.up local.deploy.crossplane
+# TODO(turkenh): Add "examples/object/object-ssa-owner.yaml" to the list to test the SSA functionality as part of the e2e tests.
+# The test is disabled for now because uptest clears the package cache when the provider restarted with the SSA flag.
+# Enable after https://github.com/crossplane/uptest/issues/17 is fixed.
+UPTEST_EXAMPLE_LIST ?= "examples/object/object.yaml,examples/object/object-watching.yaml"
+uptest: $(UPTEST) $(KUBECTL) $(KUTTL)
+	@$(INFO) running automated tests
+	@KUBECTL=$(KUBECTL) KUTTL=$(KUTTL) CROSSPLANE_NAMESPACE=${CROSSPLANE_NAMESPACE} $(UPTEST) e2e "$(UPTEST_EXAMPLE_LIST)" --setup-script=cluster/test/setup.sh || $(FAIL)
+	@$(OK) running automated tests
 
-# Run integration tests.
-test-integration: $(KIND) $(KUBECTL) $(HELM3)
-	@$(INFO) running integration tests using kind $(KIND_VERSION)
-	@$(ROOT_DIR)/cluster/integration/integration_tests.sh || $(FAIL)
-	@$(OK) integration tests passed
+local-dev: controlplane.up
+local-deploy: build controlplane.up local.xpkg.deploy.provider.$(PROJECT_NAME)
+	@$(INFO) running locally built provider
+	@$(KUBECTL) wait provider.pkg $(PROJECT_NAME) --for condition=Healthy --timeout 5m
+	@$(KUBECTL) -n $(CROSSPLANE_NAMESPACE) wait --for=condition=Available deployment --all --timeout=5m
+	@$(OK) running locally built provider
 
+e2e: local-deploy uptest
 # Update the submodules, such as the common build scripts.
 submodules:
 	@git submodule sync
@@ -117,4 +127,38 @@ run: $(KUBECTL) generate
 manifests:
 	@$(INFO) Deprecated. Run make generate instead.
 
-.PHONY: cobertura submodules fallthrough test-integration run manifests
+# NOTE(hasheddan): the build submodule currently overrides XDG_CACHE_HOME in
+# order to force the Helm 3 to use the .work/helm directory. This causes Go on
+# Linux machines to use that directory as the build cache as well. We should
+# adjust this behavior in the build submodule because it is also causing Linux
+# users to duplicate their build cache, but for now we just make it easier to
+# identify its location in CI so that we cache between builds.
+go.cachedir:
+	@go env GOCACHE
+
+go.mod.cachedir:
+	@go env GOMODCACHE
+
+.PHONY: cobertura submodules fallthrough test-integration run manifests go.mod.cachedir go.cachedir
+
+generate.run: go.generate kustomize.gen
+
+generate.done: kustomize.clean
+
+# This hack is needed because we want to inject the conversion webhook
+# configuration into the Object CRD. This is not possible with the CRD
+# generation through controller-gen, and actually kubebuilder does
+# something similar, so we are following suit. Can be removed once we
+# drop support for v1alpha1.
+kustomize.gen: $(KUBECTL)
+	@$(INFO) Generating CRDs with kustomize
+	@$(KUBECTL) kustomize cluster/kustomize/ > cluster/kustomize/kubernetes.crossplane.io_objects.yaml
+	@mv cluster/kustomize/kubernetes.crossplane.io_objects.yaml cluster/kustomize/crds/kubernetes.crossplane.io_objects.yaml
+	@mv cluster/kustomize/crds package/crds
+	@$(OK) Generated CRDs with kustomize
+
+kustomize.clean:
+	@$(INFO) Cleaning up kustomize generated CRDs
+	@rm -rf cluster/kustomize/crds
+	@rm -f cluster/kustomize/kubernetes.crossplane.io_objects.yaml
+	@$(OK) Cleaned up kustomize generated CRDs

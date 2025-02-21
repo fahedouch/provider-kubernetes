@@ -117,12 +117,48 @@ type ObjectObservation struct {
 
 // A ObjectSpec defines the desired state of a Object.
 type ObjectSpec struct {
-	xpv1.ResourceSpec `json:",inline"`
+	ResourceSpec      `json:",inline"`
 	ConnectionDetails []ConnectionDetail `json:"connectionDetails,omitempty"`
 	ForProvider       ObjectParameters   `json:"forProvider"`
 	// +kubebuilder:default=Default
 	ManagementPolicy `json:"managementPolicy,omitempty"`
 	References       []Reference `json:"references,omitempty"`
+	Readiness        Readiness   `json:"readiness,omitempty"`
+	// Watch enables watching the referenced or managed kubernetes resources.
+	//
+	// THIS IS AN ALPHA FIELD. Do not use it in production. It is not honored
+	// unless "watches" feature gate is enabled, and may be changed or removed
+	// without notice.
+	// +optional
+	// +kubebuilder:default=false
+	Watch bool `json:"watch,omitempty"`
+}
+
+// ReadinessPolicy defines how the Object's readiness condition should be computed.
+type ReadinessPolicy string
+
+const (
+	// ReadinessPolicySuccessfulCreate means the object is marked as ready when the
+	// underlying external resource is successfully created.
+	ReadinessPolicySuccessfulCreate ReadinessPolicy = "SuccessfulCreate"
+	// ReadinessPolicyDeriveFromObject means the object is marked as ready if and only if the underlying
+	// external resource is considered ready.
+	ReadinessPolicyDeriveFromObject ReadinessPolicy = "DeriveFromObject"
+
+	// ReadinessPolicyAllTrue means that all conditions have status true on the object.
+	// There must be at least one condition.
+	ReadinessPolicyAllTrue ReadinessPolicy = "AllTrue"
+)
+
+// Readiness defines how the object's readiness condition should be computed,
+// if not specified it will be considered ready as soon as the underlying external
+// resource is considered up-to-date.
+type Readiness struct {
+	// Policy defines how the Object's readiness condition should be computed.
+	// +optional
+	// +kubebuilder:validation:Enum=SuccessfulCreate;DeriveFromObject;AllTrue
+	// +kubebuilder:default=SuccessfulCreate
+	Policy ReadinessPolicy `json:"policy,omitempty"`
 }
 
 // ConnectionDetail represents an entry in the connection secret for an Object
@@ -150,6 +186,8 @@ type ObjectStatus struct {
 // +kubebuilder:printcolumn:name="READY",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:resource:scope=Cluster,categories={crossplane,managed,kubernetes}
+// +kubebuilder:deprecatedversion
+// Deprecated: v1alpha1.Object is deprecated in favor of v1alpha2.Object
 type Object struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
